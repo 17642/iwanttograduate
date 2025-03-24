@@ -20,20 +20,32 @@ gi.require_version('Gst','1.0')
 from gi.repository import Gst, GstApp, GLib
 Gst.init(None)
 #aws에 kvssink로 스트리밍하기 위한 부분
-gst_is = f"appsrc name=source is-live=true format=time ! videoconvert ! video/x-raw, format=I420 , width=640, height=640, framerate=30/1 ! \
+gst_is = f"appsrc name=source is-live=true format=time ! videoconvert ! video/x-raw, format=I420 , width=640, height=640 ! \
 x264enc byte-stream=true tune=zerolatency bitrate=500 speed-preset=ultrafast ! video/x-h264, level=4 ! h264parse ! video/x-h264, stream-format=avc, alignment=au ! kvssink stream-name=STREAM \
 access-key={os.environ['AWS_ACCESS_KEY_ID']} secret-key={os.environ['AWS_SECRET_ACCESS_KEY']} aws-region={os.environ['AWS_DEFAULT_REGION']}"
 
-testsink = f"videotestsrc is-live=true ! videoconvert ! video/x-raw, format=I420, width=640, height=480 ! x264enc tune=zerolatency bitrate=500 ! video/x-h264, stream-format=avc, alignment=au ! \
+gst_is2=f"appsrc name=source is-live=true format=time ! videoconvert ! video/x-raw, format=I420 , width=640, height=640 ! \
+x264enc byte-stream=true tune=zerolatency bitrate=500 speed-preset=ultrafast ! video/x-h264, level=4 ! h264parse ! video/x-h264, stream-format=avc, alignment=au ! filesink location=test.mkv"
+
+gst_is3 = f"appsrc name=source is-live=true format=time ! videoconvert ! video/x-raw, format=I420 , width=640, height=640 ! filesink location=test2.yuv"
+
+gst_is4 = f"appsrc name=source is-live=true format=time ! videoconvert ! video/x-raw, format=I420 , width=640, height=640 ! x264enc byte-stream=true tune=zerolatency bitrate=500 ! matroskamux ! filesink location=test3.mkv"
+
+gst_is5 = f"appsrc name=source is-live=true format=time do-timestamp=true ! videoconvert ! video/x-raw, format=I420 , width=640, height=640 ! x264enc byte-stream=true tune=zerolatency bitrate=500 key-int-max=7 ! kvssink stream-name=STREAM \
+access-key={os.environ['AWS_ACCESS_KEY_ID']} secret-key={os.environ['AWS_SECRET_ACCESS_KEY']} aws-region={os.environ['AWS_DEFAULT_REGION']}" 
+
+testsink = f"videotestsrc is-live=true ! videoconvert ! video/x-raw, format=RGB, width=640, height=640 ! x264enc tune=zerolatency bitrate=500 ! video/x-h264, stream-format=avc, alignment=au ! \
 kvssink stream-name=STREAM access-key={os.environ['AWS_ACCESS_KEY_ID']} secret-key={os.environ['AWS_SECRET_ACCESS_KEY']} aws-region={os.environ['AWS_DEFAULT_REGION']}"
-pipeline= Gst.parse_launch(gst_is)
+pipeline= Gst.parse_launch(gst_is5)
 appsrc=pipeline.get_by_name("source")
 
 appsrc.set_property("format", Gst.Format.TIME)
 appsrc.set_property("is-live",True)
-appsrc.set_property("block",False) # 버퍼가 찬 경우 블록
+appsrc.set_property("block",True) # 버퍼가 찬 경우 블록
+appsrc.set_property("max-bytes",2*1024*1024)
+appsrc.set_property("do-timestamp",True)
 
-caps = Gst.Caps.from_string("video/x-raw, format=RGB, width=640, height=640, framerate=30/1")
+caps = Gst.Caps.from_string("video/x-raw, format=BGR, width=640, height=640")
 appsrc.set_caps(caps)
 
 pipeline.set_state(Gst.State.PLAYING)
@@ -52,9 +64,10 @@ def push_data ( appsrc, endi, inp, _pts = 0): # appsrc - 싱크, endi - 종료 �
         #else:
         #    print("APPSRC")
         ret = appsrc.emit("push-buffer", Buffer)
-        #print(ret)
-        #if ret != Gst.FlowReturn.OK:
-        #    print(f"Error Pushing Buffer: {ret}")
+        if ret != Gst.FlowReturn.OK:
+            print(f"Error Pushing Buffer: {ret}")
+
+                
 
             
         pts +=duration
@@ -265,4 +278,6 @@ try:
                 cv2.waitKey(1)
 except KeyboardInterrupt:
     appsrc.emit("end-of-stream")
+    pipeline.set_state(Gst.State.NULL)
     GPIO.cleanup()
+
