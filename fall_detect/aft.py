@@ -11,6 +11,15 @@ from picamera2.devices import Hailo
 import time
 import threading
 
+NOSE, L_EYE, R_EYE, L_EAR, R_EAR, L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, \
+    L_WRIST, R_WRIST, L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE = range(17)
+
+JOINT_PAIRS = [[NOSE, L_EYE], [L_EYE, L_EAR], [NOSE, R_EYE], [R_EYE, R_EAR],
+               [L_SHOULDER, R_SHOULDER],
+               [L_SHOULDER, L_ELBOW], [L_ELBOW, L_WRIST], [R_SHOULDER, R_ELBOW], [R_ELBOW, R_WRIST],
+               [L_SHOULDER, L_HIP], [R_SHOULDER, R_HIP], [L_HIP, R_HIP],
+               [L_HIP, L_KNEE], [R_HIP, R_KNEE], [L_KNEE, L_ANKLE], [R_KNEE, R_ANKLE]]
+
 GIS = grn("gst_is5")
 GPI = gpioController()
 FD = FallDetector()
@@ -44,7 +53,6 @@ def handle_fall_alert():
         SNS.send_sns_message('fall detected')
     
     fall_detected = False
-
 
 def visualize_pose_estimation_result(results, image, model_size, detection_threshold=0.5, joint_threshold=0.5):
     image_size = (image.shape[1], image.shape[0])
@@ -100,6 +108,8 @@ try:
 
                 GIS.push_data(frame)
                 kps = FD.process_pose_data(last_predictions, model_size)
+                visualize_pose_estimation_result(last_predictions,frame, model_size)
+
                 if kps is not None:
                     LS, RS, LH, RH = kps
                     if (FD.detect_fall(LS,RS,LH,RH)) and not fall_detected:
@@ -109,6 +119,8 @@ try:
                         last_fall_time = time.time()
 
                         threading.Thread(target=handle_fall_alert, daemon=True).start()
+                
+                cv2.imshow(frame)
 
 
 
