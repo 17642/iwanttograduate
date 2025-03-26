@@ -46,6 +46,38 @@ def handle_fall_alert():
     fall_detected = False
 
 
+def visualize_pose_estimation_result(results, image, model_size, detection_threshold=0.5, joint_threshold=0.5):
+    image_size = (image.shape[1], image.shape[0])
+
+    def scale_coord(coord):
+        return tuple([int(c * t / f) for c, f, t in zip(coord, model_size, image_size)])
+
+    bboxes, scores, keypoints, joint_scores = (
+        results['bboxes'], results['scores'], results['keypoints'], results['joint_scores'])
+    box, score, keypoint, keypoint_score = bboxes[0], scores[0], keypoints[0], joint_scores[0]
+
+    for detection_box, detection_score, detection_keypoints, detection_keypoints_score in (
+            zip(box, score, keypoint, keypoint_score)):
+        if detection_score < detection_threshold:
+            continue
+
+        coord_min = scale_coord(detection_box[:2])
+        coord_max = scale_coord(detection_box[2:])
+        cv2.rectangle(image, coord_min, coord_max, (255, 0, 0), 1)
+        #cv2.putText(image, f"Score: {detection_score:.2f}", coord_min, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (36, 255, 12), 1)
+
+        joint_visible = detection_keypoints_score > joint_threshold
+        detection_keypoints = detection_keypoints.reshape(17, 2)
+
+        for joint, joint_score in zip(detection_keypoints, detection_keypoints_score):
+            if joint_score > joint_threshold:
+                cv2.circle(image, scale_coord(joint), 4, (255, 0, 255), -1)
+
+        for joint0, joint1 in JOINT_PAIRS:
+            if joint_visible[joint0] and joint_visible[joint1]:
+                cv2.line(image, scale_coord(detection_keypoints[joint0]),
+                         scale_coord(detection_keypoints[joint1]), (255, 0, 255), 3)
+
 try:
     with Hailo(args.model) as hailo:
         main_size = (1024,768)
