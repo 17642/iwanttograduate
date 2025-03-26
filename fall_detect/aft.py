@@ -120,7 +120,8 @@ try:
 
                         threading.Thread(target=handle_fall_alert, daemon=True).start()
                 
-                cv2.imshow(frame)
+                cv2.imshow('카메라',frame)
+                cv2.waitKey(1)
 
 
 
