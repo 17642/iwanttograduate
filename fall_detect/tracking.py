@@ -23,9 +23,9 @@ class Tracker:
         self.tilt_error_prev = 0
         self.pan_integral = 0
         self.tilt_integral = 0
-        self.Kp = 0.02  # 비례 gain
-        self.Ki = 0.005  # 적분 gain
-        self.Kd = 0.01  # 미분 gain
+        self.Kp = 0.01  # 비례 gain
+        self.Ki = 0.002  # 적분 gain
+        self.Kd = 0.005  # 미분 gain
         
         # 추적 대상 ID
         self.tracked_person_id = None
@@ -92,8 +92,8 @@ class Tracker:
         tilt_duty = 7.5 + tilt_output
         
         # 듀티 사이클 제한 (2.5~12.5, 약 -90도~90도)
-        pan_duty = max(2.5, min(12.5, pan_duty))
-        tilt_duty = max(2.5, min(12.5, tilt_duty))
+        pan_duty = max(7.3, min(7.7, pan_duty))
+        tilt_duty = max(7.2, min(7.8, tilt_duty))
         
         # 서보모터 제어
         self.pan_servo.ChangeDutyCycle(pan_duty)
