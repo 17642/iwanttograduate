@@ -2,6 +2,7 @@ from detectfall import FallDetector
 from gpi import gpioController
 from girun import grn
 from snssender import snsSender
+from tracking import Tracker
 
 import argparse
 import cv2
@@ -30,6 +31,8 @@ parser.add_argument('-m', '--model', help="HEF file path", default="/usr/share/h
 args = parser.parse_args()
 
 last_predictions = None
+
+tracker = Tracker(pan_pin=18, tilt_pin=19)
 
 # 상태 변수
 fall_detected = False
@@ -86,6 +89,12 @@ def visualize_pose_estimation_result(results, image, model_size, detection_thres
                 cv2.line(image, scale_coord(detection_keypoints[joint0]),
                          scale_coord(detection_keypoints[joint1]), (255, 0, 255), 3)
 
+def draw_predictions(request):
+    with MappedArray(request, 'main') as m:
+        predictions = last_predictions
+        if predictions:
+            tracker.track_person(predictions, m.array, model_size)  # 사람 추적 호출
+
 try:
     with Hailo(args.model) as hailo:
         main_size = (1024,768)
@@ -119,6 +128,8 @@ try:
                         last_fall_time = time.time()
 
                         threading.Thread(target=handle_fall_alert, daemon=True).start()
+
+                tracker.track_person(last_predictions, frame, model_size)
                 
                 cv2.imshow('카메라',frame)
                 cv2.waitKey(1)
@@ -129,3 +140,4 @@ try:
 except KeyboardInterrupt:
     GIS.end_stream()
     GPI.end_proc()
+    tracker.cleanup()
