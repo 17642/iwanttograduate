@@ -188,14 +188,8 @@ def main():
 
 
 if __name__ == "__main__":
-    #main()
-    os.makedirs(database_dir, exist_ok=True)
-    lst = make_file_list_list()
-    process_sound_from_file_list(lst["14_0"],14,0)
-    process_sound_from_file_list(lst["14_1"],14,1)
-    process_sound_from_file_list(lst["14_2"],14,2)
-    process_sound_from_file_list(lst["14_3"],14,3)
-    process_sound_from_file_list(lst["14_4"],14,4)
+    main()
+
 
 
 
