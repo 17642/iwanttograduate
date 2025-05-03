@@ -144,6 +144,16 @@ def get_filename_and_internal_index_from_entire_list(list, label, index,max_chun
 
     return filename, (index - cnt)%max_chunk_size
 
+def get_filename_from_label_and_index(label, index, jsonlist,data_dir=DEFAULT_DATASET_PATH):
+    target = f"{data_dir}\\{jsonlist[label]}"
+
+    ret = {}
+    with open(target) as f:
+        json_str = json.load(f)
+        ret = json_str[index]
+
+    return ret
+
 def test():
     llist, json_list = get_every_file_list()
     print(get_metadata_from_filename(llist[0][0][2]))
@@ -152,6 +162,8 @@ def test():
     print(get_filename_and_internal_index_from_entire_list(llist,2,1002))
 
     print(get_count_from_labels(llist[3]))
+
+    print(get_filename_from_label_and_index(0,10000,json_list))
 
 if __name__ == "__main__":
     test()
