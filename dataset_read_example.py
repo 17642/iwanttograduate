@@ -10,7 +10,7 @@ DEFAULT_MAX_CHUNK_SIZE = 1000
 
 #Name Structure
 # Npy: {label}_{sub_label}_{chunk}_{sample_count}.npy
-# Json: {label}_lb.json
+# Json: {label}_{sub_label}_lb.json
 
 #data Structure
 # npylist: [[[]]](3-axis). npylist[label][sublabel][cnt] -> filename
@@ -31,8 +31,9 @@ def sort_json_key(s):
     ls = get_last_name(s)
     parts = ls.split('_')
     label_num = int(parts[0])
+    sublabel_num = int(parts[1])
 
-    return label_num
+    return label_num, sublabel_num
 
 def make_npy_doublelist(npylist = None, class_count = DEFAULT_CLASS_COUNT, sublabel_count_list = DEFAULT_SUBLABEL_COUNT_LIST):
     npy_list_list = []
@@ -144,13 +145,41 @@ def get_filename_and_internal_index_from_entire_list(list, label, index,max_chun
 
     return filename, (index - cnt)%max_chunk_size
 
-def get_filename_from_label_and_index(label, index, jsonlist,data_dir=DEFAULT_DATASET_PATH):
-    target = f"{data_dir}\\{jsonlist[label]}"
+def get_sublabel_and_internal_idx_from_label_list(list, index):
+
+    sublabel = 0
+    internal_idx = 0
+
+    sublabel_num = len(list)
+    sublabel_count_list = []
+
+    for i in range(sublabel_num):
+        sublabel_count_list.append(get_count_from_sublabel(list[i]))
+    cnt = 0
+
+    for i in range(sublabel_num):
+        if index < cnt+sublabel_count_list[i]:
+            sublabel = i
+            break
+        cnt+=sublabel_count_list[i]
+
+    internal_idx = index - cnt
+
+    return sublabel,internal_idx
+
+
+
+def get_filename_from_label_and_index(label, index,list,jsonlist,data_dir=DEFAULT_DATASET_PATH):
+    
+    nw,idx =  get_sublabel_and_internal_idx_from_label_list(list[label],index)
+
+
+    target = f"{data_dir}\\{label}_{nw}{JSON_ENDING}"
 
     ret = {}
     with open(target) as f:
         json_str = json.load(f)
-        ret = json_str[index]
+        ret = json_str[idx]
 
     return ret
 
@@ -162,8 +191,7 @@ def test():
     print(get_filename_and_internal_index_from_entire_list(llist,2,1002))
 
     print(get_count_from_labels(llist[3]))
-
-    print(get_filename_from_label_and_index(0,10000,json_list))
+    print(get_filename_from_label_and_index(0,10000,llist,json_list))
 
 if __name__ == "__main__":
     test()

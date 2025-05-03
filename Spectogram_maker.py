@@ -161,7 +161,7 @@ def process_sound_from_file_list(lst, label, fnum):
     print(f"Saved: {save_path} at [{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))}]")
     temporal_spectogram.clear()
     
-    label_json_path_open = f"{database_dir}\\{label}{label_path}"
+    label_json_path_open = f"{database_dir}\\{label}_{fnum}{label_path}"
     with open(label_json_path_open,'w') as json_file:
         json.dump(label_namelist, json_file, indent=4)
     
@@ -188,7 +188,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    #main()
+    os.makedirs(database_dir, exist_ok=True)
+    lst = make_file_list_list()
+    process_sound_from_file_list(lst["14_0"],14,0)
+    process_sound_from_file_list(lst["14_1"],14,1)
+    process_sound_from_file_list(lst["14_2"],14,2)
+    process_sound_from_file_list(lst["14_3"],14,3)
+    process_sound_from_file_list(lst["14_4"],14,4)
 
 
 
