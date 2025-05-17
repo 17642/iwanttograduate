@@ -1,5 +1,7 @@
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -18,12 +20,14 @@ import numpy as np
 DEFAULT_MODEL_PATH = ".\\checkpoints\\best_model.pth"
 DEFAULT_DATA_PATH = ".\\valid_dataset"
 DEFAULT_VALIDATE_BATCH = 32
+DEFAULT_ONNX_SAVE_PATH='onnx_model.onnx'
 
 LINE = '-'*32
 BLANK = ' '*64
 
-def print_with_ext(str):
-    print(str)
+def print_with_ext(str, silent=False):
+    if not silent:
+        print(str)
     return str
 
 class Validation(CNNAudioClassifier):
@@ -115,6 +119,9 @@ class Validation(CNNAudioClassifier):
         accuracy = correct/total
 
         return {"loss": avg_loss, "accuracy": accuracy},self.outtxt, conf_matrix
+    
+    def rtn_txt_out(self):
+        return self.outtxt
 
 
 def main(args):
@@ -151,10 +158,43 @@ def main(args):
         confusion_matrix = np.array(confusion_matrix)
         np.save(args.confusion_matrix,confusion_matrix)
     
+def Return_Model_Onnx(args):
 
+    out_log = ""
+    txtout = False
+
+    if args.output is not None:
+        txtout = True
+    
+    example_input = (torch.randn(16,64,128),)
+    out_log += print_with_ext(f"EXAMPLE INPUT IS {example_input[0].shape}")
+    model = Validation(args.model_path, args.data_path, configs.NUM_CLASSES,args.iteration,args.silent,txtout)
+    out_log += model.rtn_txt_out()+'\n'
+    onnx_prog = torch.onnx.export(model,example_input,dynamo=True,input_names=['input'],output_names=['output'],dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}, opset_version=11)
+    out_log += print_with_ext(f"{'ONNX MODEL EXPORTED':<40}[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))}]",args.silent)+'\n'
+
+    svpath = DEFAULT_ONNX_SAVE_PATH
+
+    if args.onnx_save_path is not None:
+        svpath = args.onnx_save_path
+
+    
+
+    if args.onnx_optimize:
+        onnx_prog.optimize()
+        out_log += print_with_ext(f"{'ONNX MODEL OPTIMIZED':<40}[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))}]",args.silent)+'\n'
+    
+    onnx_prog.save(svpath)
+    out_log += print_with_ext(f"{'ONNX MODEL SAVED':<40}[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))}]",args.silent)+'\n'
+    out_log += print_with_ext(f"{'AT':<5}{svpath}")+'\n'
+
+    if txtout :
+        with open(args.output,'w',encoding='utf-8') as f:
+            f.write(out_log)
+            f.close()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog='Valitation',description='설명 아무거나 넣기')
+    parser = argparse.ArgumentParser(prog='python Vaildation.py',description='설명 아무거나 넣기')
     parser.add_argument('-o','--output',action='store',default=None,type=str)
     parser.add_argument('-m','--confusion-matrix',action='store',default=None,type=str)
     parser.add_argument('-s','--silent',action='store_true',default=False)
@@ -162,9 +202,16 @@ if __name__ == "__main__":
     parser.add_argument('-p','--model-path',action='store',default=DEFAULT_MODEL_PATH,type=str)
     parser.add_argument('-p2','--data-path',action='store',default=DEFAULT_DATA_PATH,type=str)
     parser.add_argument('-b','--batch',action='store',default=DEFAULT_VALIDATE_BATCH,type=int)
+    parser.add_argument('-x', '--onnx', action='store_true',default=False)
+    parser.add_argument('-t','--onnx-optimize',action='store_true',default=False)
+    parser.add_argument('-v', '--onnx-save-path', action = 'store', default=None, type=str)
     
     args = parser.parse_args()
 
     init()
-    main(args)
+
+    if args.onnx:
+        Return_Model_Onnx(args)
+    else:
+        main(args)
 
