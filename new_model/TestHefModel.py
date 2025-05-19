@@ -76,9 +76,9 @@ def main():
     with InferVStreams(network_group, in_params, out_params) as infer_pipeline:
         for wav in wavs:
             path = os.path.join(TEST_DIR, wav)
-            # 파일명에서 true label 추출 (예: '5.화재_...')
+            # 파일명에서 true label 추출 (예: '5.화재_...'), 1~15 → 0~14 인덱스로 맞추기
             try:
-                true_label = int(wav.split('.', 1)[0])
+                true_label = int(wav.split('.', 1)[0]) - 1
             except ValueError:
                 true_label = None
 
@@ -92,7 +92,11 @@ def main():
             if match:
                 correct += 1
 
-            print(f"{wav} -> True: {true_label}, Pred: {pred}, Scores: {out.tolist()}, Correct: {match}")
+            # out: numpy array of shape [num_classes]
+            logits = torch.from_numpy(out)
+            probs  = F.softmax(logits, dim=0).numpy()    # 이제 0~1 사이, 합은 1
+
+            print(f"{wav} -> True: {true_label}, Pred: {pred}, Scores: {probs.tolist()}, Correct: {match}")
 
     accuracy = correct / total * 100
     print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total})")
