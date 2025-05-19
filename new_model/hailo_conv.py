@@ -18,6 +18,11 @@ DEFAULT_MODEL_NAME = 'main_graph'
 DEFAULT_DATASET_PATH = "valid_dataset\\"
 DEFAULT_DATA_PARSE_SIZE = 360
 
+model_script_commands = [
+    "model_optimization_config(compression_params, auto_4bit_weights_ratio=0.6)\n"
+    "model_optimization_flavor(optimization_level=2)\n",
+]
+
 INPUTS = ['input']
 OUTPUTS = ['output']
 INPUT_SHAPES = {'input':[1,1,64,128]}
@@ -50,6 +55,8 @@ if __name__ == "__main__":
             end_node_names=OUTPUTS,
             net_input_shapes=INPUT_SHAPES,
         )
+        
+        runner.load_model_script("".join(model_script_commands))
         
         
         dataset = EmergencySoundDataset(args.data_path)
