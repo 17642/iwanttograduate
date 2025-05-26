@@ -21,7 +21,7 @@ HEF_PATH = "converted_model.hef"
 NUM_MELS = 64
 MAX_FRAMES = 128
 SAMPLE_RATE = 16000
-DURATION = 1.0   # 초
+DURATION = 1.6   # 초
 
 DANGER_CLASS = set(range(14))  # 0~13이 위험, 14는 안전
 
