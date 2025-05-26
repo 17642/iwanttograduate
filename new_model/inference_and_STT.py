@@ -15,7 +15,7 @@ MQTT_PORT   = 1883
 MQTT_TOPIC  = 'home/sensors/hazard'
 
 # ───── Hailo HEF 설정 ─────
-HEF_PATH = "./cnn_hazard_detector.hef"
+HEF_PATH = "converted_model.hef"
 NUM_MELS = 64
 MAX_FRAMES = 128
 SAMPLE_RATE = 16000
