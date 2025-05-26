@@ -5,7 +5,8 @@ import sounddevice as sd
 import numpy as np
 import torch
 from torchaudio.transforms import MelSpectrogram, AmplitudeToDB
-import speech_recognition as sr
+from google.cloud import speech
+import pyaudio
 import json
 import os
 
@@ -33,6 +34,38 @@ mel_transform = MelSpectrogram(
     n_fft=400
 )
 db_transform = AmplitudeToDB()
+
+STT_LANGUAGE_CODE = "ko-KR"
+STT_SAMPLE_RATE = 16000
+STT_CHUNK_SIZE = int(STT_SAMPLE_RATE / 10)
+YOUR_MICROPHONE_INDEX = 0 # 실제 마이크 인덱스 확인 필요
+
+def google_stt_listen_and_transcribe(timeout=1):
+    client = speech.SpeechClient()
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paInt16, channels=1, rate=STT_SAMPLE_RATE,
+                    input=True, frames_per_buffer=STT_CHUNK_SIZE,
+                    input_device_index=YOUR_MICROPHONE_INDEX)
+    frames = []
+    print("음성 녹음 시작...")
+    for _ in range(0, int(STT_SAMPLE_RATE / STT_CHUNK_SIZE * timeout)):
+        data = stream.read(STT_CHUNK_SIZE)
+        frames.append(data)
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+    audio_data = b''.join(frames)
+    audio = speech.RecognitionAudio(content=audio_data)
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=STT_SAMPLE_RATE,
+        language_code=STT_LANGUAGE_CODE,
+        enable_automatic_punctuation=True,
+    )
+    response = client.recognize(config=config, audio=audio)
+    for result in response.results:
+        return result.alternatives[0].transcript
+    return None
 
 def preprocess_to_mel(wave):
     tensor = torch.from_numpy(wave).unsqueeze(0)
@@ -91,23 +124,17 @@ def hef_inference_thread():
             AUDIO_QUEUE.task_done()
 
 def stt_thread():
-    recognizer = sr.Recognizer()
     while True:
         audio = AUDIO_QUEUE.get()
-        audio16 = (audio * 32767).astype(np.int16)
-        audio_bytes = audio16.tobytes()
-        audio_data = sr.AudioData(audio_bytes, SAMPLE_RATE, 2)
         try:
-            text = recognizer.recognize_google(audio_data, language="ko-KR")
+            text = google_stt_listen_and_transcribe(timeout=1)
             print(f"[STT 결과] {text}")
             msg = {
                 "timestamp": time.time(),
                 "type": "stt",
-                "text": text
+                "text": text if text else ""
             }
             send_stt_pipe(msg)
-        except sr.UnknownValueError:
-            print("[STT] 인식 불가")
         except Exception as e:
             print("[STT] 오류:", e)
         AUDIO_QUEUE.task_done()
