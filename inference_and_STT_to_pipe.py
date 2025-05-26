@@ -11,8 +11,9 @@ import os
 
 from hailo_platform import HEF, VDevice, InferVStreams, InputVStreamParams, OutputVStreamParams, FormatType
 
-# ====== 통합 파이프 경로 ======
-EVENT_PIPE = "/tmp/event_pipe"
+# ====== 파이프 경로 ======
+EVENT_PIPE = "/tmp/event_pipe"   # 모델 추론 + 레이더 결과
+STT_PIPE = "/tmp/stt_pipe"       # STT 변환 결과
 
 # ====== 오디오/모델 파라미터 ======
 HEF_PATH = "converted_model.hef"
@@ -45,14 +46,21 @@ def preprocess_to_mel(wave):
         spec = spec[:, :, :MAX_FRAMES]
     return spec[:, None, :, :]  # (1, 1, 64, 128)
 
-# --- 통합 파이프에 메시지 기록 ---
+# --- event_pipe에 메시지 기록 ---
 def send_event_pipe(msg_dict):
-    # 메시지는 한 줄씩 기록 (atomic write)
     try:
         with open(EVENT_PIPE, "w") as f:
             f.write(json.dumps(msg_dict, ensure_ascii=False) + "\n")
     except Exception as e:
         print("[PIPE] 기록 실패:", e)
+
+# --- stt_pipe에 메시지 기록 ---
+def send_stt_pipe(msg_dict):
+    try:
+        with open(STT_PIPE, "w") as f:
+            f.write(json.dumps(msg_dict, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print("[STT_PIPE] 기록 실패:", e)
 
 def hef_inference_thread():
     device = VDevice()
@@ -66,7 +74,7 @@ def hef_inference_thread():
     with InferVStreams(network_group, input_vstreams_params, output_vstreams_params) as infer_pipeline:
         while True:
             audio = AUDIO_QUEUE.get()
-            mel_db = preprocess_to_mel(audio)  # (1,1,64,128)
+            mel_db = preprocess_to_mel(audio)
             input_data = {input_info.name: mel_db}
             infer_results = infer_pipeline.infer(input_data)
             scores = infer_results[output_info.name][0]
@@ -97,7 +105,7 @@ def stt_thread():
                 "type": "stt",
                 "text": text
             }
-            send_event_pipe(msg)
+            send_stt_pipe(msg)
         except sr.UnknownValueError:
             print("[STT] 인식 불가")
         except Exception as e:
@@ -109,9 +117,10 @@ def audio_callback(indata, frames, time_info, status):
     AUDIO_QUEUE.put(wave)
 
 def main():
-    # 통합 파이프 없으면 생성
-    if not os.path.exists(EVENT_PIPE):
-        os.mkfifo(EVENT_PIPE)
+    # 파이프 없으면 생성
+    for pipe_path in [EVENT_PIPE, STT_PIPE]:
+        if not os.path.exists(pipe_path):
+            os.mkfifo(pipe_path)
     threading.Thread(target=hef_inference_thread, daemon=True).start()
     threading.Thread(target=stt_thread, daemon=True).start()
     blocksize = int(SAMPLE_RATE * DURATION)
