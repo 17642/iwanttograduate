@@ -6,9 +6,9 @@ import numpy as np
 import torch
 from torchaudio.transforms import MelSpectrogram, AmplitudeToDB
 from google.cloud import speech
-import pyaudio
 import json
 import os
+import wave
 
 from hailo_platform import HEF, VDevice, InferVStreams, InputVStreamParams, OutputVStreamParams, FormatType
 
@@ -37,35 +37,16 @@ db_transform = AmplitudeToDB()
 
 STT_LANGUAGE_CODE = "ko-KR"
 STT_SAMPLE_RATE = 16000
-STT_CHUNK_SIZE = int(STT_SAMPLE_RATE / 10)
-YOUR_MICROPHONE_INDEX = 0 # 실제 마이크 인덱스 확인 필요
 
-def google_stt_listen_and_transcribe(timeout=1):
-    client = speech.SpeechClient()
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=STT_SAMPLE_RATE,
-                    input=True, frames_per_buffer=STT_CHUNK_SIZE,
-                    input_device_index=YOUR_MICROPHONE_INDEX)
-    frames = []
-    print("음성 녹음 시작...")
-    for _ in range(0, int(STT_SAMPLE_RATE / STT_CHUNK_SIZE * timeout)):
-        data = stream.read(STT_CHUNK_SIZE)
-        frames.append(data)
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-    audio_data = b''.join(frames)
-    audio = speech.RecognitionAudio(content=audio_data)
-    config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=STT_SAMPLE_RATE,
-        language_code=STT_LANGUAGE_CODE,
-        enable_automatic_punctuation=True,
-    )
-    response = client.recognize(config=config, audio=audio)
-    for result in response.results:
-        return result.alternatives[0].transcript
-    return None
+def wave_to_temp_wavfile(wave_np, filename, samplerate=16000):
+    # wave_np: float32, [-1, 1]
+    audio_int16 = (wave_np * 32767).astype(np.int16)
+    with wave.open(filename, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2) # int16
+        wf.setframerate(samplerate)
+        wf.writeframes(audio_int16.tobytes())
+    return filename
 
 def preprocess_to_mel(wave):
     tensor = torch.from_numpy(wave).unsqueeze(0)
@@ -124,10 +105,26 @@ def hef_inference_thread():
             AUDIO_QUEUE.task_done()
 
 def stt_thread():
+    client = speech.SpeechClient()
     while True:
         audio = AUDIO_QUEUE.get()
+        temp_path = "/tmp/stt_temp.wav"
+        wave_to_temp_wavfile(audio, temp_path, samplerate=STT_SAMPLE_RATE)
+        with open(temp_path, "rb") as f:
+            audio_bytes = f.read()
+        audio_proto = speech.RecognitionAudio(content=audio_bytes)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=STT_SAMPLE_RATE,
+            language_code=STT_LANGUAGE_CODE,
+            enable_automatic_punctuation=True,
+        )
         try:
-            text = google_stt_listen_and_transcribe(timeout=1)
+            response = client.recognize(config=config, audio=audio_proto)
+            text = ""
+            for result in response.results:
+                text = result.alternatives[0].transcript
+                break
             print(f"[STT 결과] {text}")
             msg = {
                 "timestamp": time.time(),
