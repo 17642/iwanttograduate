@@ -20,7 +20,7 @@ STT_PIPE = "/tmp/stt_pipe"       # STT 변환 결과
 HEF_PATH = "converted_model.hef"
 NUM_MELS = 64
 MAX_FRAMES = 128
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 44100
 DURATION = 1.6   # 초
 
 DANGER_CLASS = set(range(14))  # 0~13이 위험, 14는 안전
