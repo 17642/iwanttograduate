@@ -133,8 +133,8 @@ def stt_google_streaming_thread():
     def google_stt_once(voice_data):
         # voice_data: float32 numpy, range -1~1
         blocksize = 2048
-        idx = 0
         def gen():
+            idx = 0
             while idx < len(voice_data):
                 chunk = voice_data[idx:idx+blocksize]
                 chunk_pcm = np.clip(chunk, -1, 1)
@@ -152,24 +152,30 @@ def stt_google_streaming_thread():
             interim_results=False,
             single_utterance=True
         )
-        responses = client.streaming_recognize(streaming_config, gen())
-        text = ""
-        for response in responses:
-            for result in response.results:
-                if result.alternatives:
-                    text = result.alternatives[0].transcript
-                    break
-        print(f"[STT 결과] {text}")
-        msg = {
-            "timestamp": time.time(),
-            "type": "stt",
-            "text": text if text else ""
-        }
-        send_stt_pipe(msg)
+        try:
+            responses = client.streaming_recognize(streaming_config, gen())
+            text = ""
+            for response in responses:
+                for result in response.results:
+                    if result.alternatives:
+                        text = result.alternatives[0].transcript
+                        break
+            print(f"[STT 결과] {text}")
+            msg = {
+                "timestamp": time.time(),
+                "type": "stt",
+                "text": text if text else ""
+            }
+            send_stt_pipe(msg)
+        except Exception as e:
+            print(f"[STT] google_stt_once 내부 오류: {e}")
 
     # 실제 스레드 본체
     for voice_data in stream_to_google():
-        google_stt_once(voice_data)
+        if len(voice_data) > 0:
+            google_stt_once(voice_data)
+        else:
+            print("[STT] 전달할 음성 데이터 없음 (voice_data 길이 0)")
         STT_MODE_FLAG.clear()  # STT 끝나면 hef 재개
 
 def audio_input_thread():
