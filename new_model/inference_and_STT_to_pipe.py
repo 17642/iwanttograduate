@@ -25,7 +25,9 @@ DURATION = 1.6   # 초
 
 DANGER_CLASS = set(range(14))  # 0~13이 위험, 14는 안전
 
-AUDIO_QUEUE = queue.Queue()
+# === 큐: 위험감지/음성인식 각각 독립 큐 사용 ===
+HEF_QUEUE = queue.Queue()
+STT_QUEUE = queue.Queue()
 
 mel_transform = MelSpectrogram(
     sample_rate=SAMPLE_RATE,
@@ -35,8 +37,9 @@ mel_transform = MelSpectrogram(
 )
 db_transform = AmplitudeToDB()
 
+VAD_ENERGY_THRESHOLD = 0.02   # 실험적으로 조절 필요
+VAD_MIN_DURATION = 0.4        # 음성이 0.4초 이상 지속되어야 "음성시작" 인정
 STT_LANGUAGE_CODE = "ko-KR"
-STT_SAMPLE_RATE = 44100
 
 def wave_to_temp_wavfile(wave_np, filename, samplerate=16000):
     # wave_np: float32, [-1, 1]
@@ -91,7 +94,7 @@ def hef_inference_thread():
     output_vstreams_params = OutputVStreamParams.make(network_group, format_type=FormatType.UINT8)
     with InferVStreams(network_group, input_vstreams_params, output_vstreams_params) as infer_pipeline:
         while True:
-            audio = AUDIO_QUEUE.get()
+            audio = HEF_QUEUE.get()
             mel_db = preprocess_to_mel(audio)
             mel_db = np.expand_dims(mel_db,axis=0)
             #new_input_data = np.zeros((64,64,128,1)).astype(np.float32)
@@ -112,29 +115,40 @@ def hef_inference_thread():
                     "scores": [float(x) for x in scores]
                 }
                 send_event_pipe(msg)
-            AUDIO_QUEUE.task_done()
+            HEF_QUEUE.task_done()
 
 def stt_thread():
     client = speech.SpeechClient()
     while True:
-        audio = AUDIO_QUEUE.get()
-        temp_path = "/tmp/stt_temp.wav"
-        wave_to_temp_wavfile(audio, temp_path, samplerate=STT_SAMPLE_RATE)
-        with open(temp_path, "rb") as f:
-            audio_bytes = f.read()
-        audio_proto = speech.RecognitionAudio(content=audio_bytes)
+        audio = STT_QUEUE.get()
+        # 1. 실시간 스트리밍 방식으로 변환
+        def audio_generator():
+            blocksize = 2048
+            idx = 0
+            while idx < len(audio):
+                chunk = audio[idx:idx+blocksize]
+                yield speech.StreamingRecognizeRequest(audio_content=chunk.astype(np.float32).tobytes())
+                idx += blocksize
+
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=STT_SAMPLE_RATE,
             language_code=STT_LANGUAGE_CODE,
             enable_automatic_punctuation=True,
         )
+        streaming_config = speech.StreamingRecognitionConfig(
+            config=config,
+            interim_results=False,
+            single_utterance=True
+        )
         try:
-            response = client.recognize(config=config, audio=audio_proto)
+            responses = client.streaming_recognize(streaming_config, audio_generator())
             text = ""
-            for result in response.results:
-                text = result.alternatives[0].transcript
-                break
+            for response in responses:
+                for result in response.results:
+                    if result.alternatives:
+                        text = result.alternatives[0].transcript
+                        break
             print(f"[STT 결과] {text}")
             msg = {
                 "timestamp": time.time(),
@@ -144,26 +158,63 @@ def stt_thread():
             send_stt_pipe(msg)
         except Exception as e:
             print("[STT] 오류:", e)
-        AUDIO_QUEUE.task_done()
+        STT_QUEUE.task_done()
 
 def audio_callback(indata, frames, time_info, status):
+    # 실시간 오디오 프레임(1.6초 or 짧게)
+    global vad_voice_active, vad_voice_buffer, vad_voice_frames
     wave = indata[:,0].copy()
-    AUDIO_QUEUE.put(wave)
-    #print("INPUT WAVE is ",wave)
+
+    energy = np.sqrt(np.mean(wave**2))
+    # --- VAD State Machine ---
+    if not vad_voice_active:
+        if energy > VAD_ENERGY_THRESHOLD:
+            vad_voice_frames += 1
+            vad_voice_buffer.append(wave)
+            if vad_voice_frames * frames/SAMPLE_RATE >= VAD_MIN_DURATION:
+                # 목소리 시작
+                vad_voice_active = True
+                print("[VAD] 음성 감지 시작!")
+        else:
+            vad_voice_frames = 0
+            vad_voice_buffer.clear()
+        if not vad_voice_active:
+            # 평상시 1.6초 블록 → 위험감지
+            if len(wave) == int(SAMPLE_RATE*DURATION):
+                HEF_QUEUE.put(wave)
+    else:
+        vad_voice_buffer.append(wave)
+        if energy > VAD_ENERGY_THRESHOLD:
+            vad_voice_frames = 0  # Reset silence timer
+        else:
+            vad_voice_frames += 1
+            if vad_voice_frames * frames/SAMPLE_RATE >= 0.5:  # 0.5초 이상 조용하면
+                # 목소리 끝!
+                voice_chunk = np.concatenate(vad_voice_buffer)
+                STT_QUEUE.put(voice_chunk)
+                vad_voice_active = False
+                vad_voice_frames = 0
+                vad_voice_buffer.clear()
+                print("[VAD] 음성 종료, STT 전송")
     
 
 def main():
-    # 파이프 없으면 생성
+    global vad_voice_active, vad_voice_buffer, vad_voice_frames
+    vad_voice_active = False
+    vad_voice_buffer = []
+    vad_voice_frames = 0
+
     for pipe_path in [EVENT_PIPE, STT_PIPE]:
         if not os.path.exists(pipe_path):
             os.mkfifo(pipe_path)
     threading.Thread(target=hef_inference_thread, daemon=True).start()
     threading.Thread(target=stt_thread, daemon=True).start()
-    blocksize = int(SAMPLE_RATE * DURATION)
+
+    # 0.2초 단위로 프레임 전송(VAD 반응성↑)
     with sd.InputStream(
         channels=1,
         samplerate=SAMPLE_RATE,
-        blocksize=blocksize,
+        blocksize=int(SAMPLE_RATE*0.2),
         callback=audio_callback,
     ):
         print("실시간 감지 시작 (Ctrl+C로 종료)")
