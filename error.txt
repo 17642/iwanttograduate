@@ -33,3 +33,41 @@ INPUT WAVE is  [-0.02150188 -0.0223667  -0.01054537 ... -0.00274954 -0.00471242
 [STT 결과] 
 INPUT WAVE is  [-8.6611614e-04 -6.5833097e-05 -1.7091138e-03 ...  2.2009050e-02
   2.2314675e-02  2.4319423e-02]
+
+
+Exception in thread Thread-2 (stt_google_streaming_thread):
+Traceback (most recent call last):
+  File "/usr/lib/python3.11/threading.py", line 1038, in _bootstrap_inner
+    self.run()
+  File "/usr/lib/python3.11/threading.py", line 975, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/button/Downloads/inference_and_STT_to_pipe_g.py", line 172, in stt_google_streaming_thread
+    google_stt_once(voice_data)
+  File "/home/button/Downloads/inference_and_STT_to_pipe_g.py", line 155, in google_stt_once
+    responses = client.streaming_recognize(streaming_config, gen())
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/button/.local/lib/python3.11/site-packages/google/cloud/speech_v1/helpers.py", line 81, in streaming_recognize
+    return super(SpeechHelpers, self).streaming_recognize(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/button/.local/lib/python3.11/site-packages/google/cloud/speech_v1/services/speech/client.py", line 1143, in streaming_recognize
+    response = rpc(
+               ^^^^
+  File "/home/button/.local/lib/python3.11/site-packages/google/api_core/gapic_v1/method.py", line 131, in __call__
+    return wrapped_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/button/.local/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 293, in retry_wrapped_func
+    return retry_target(
+           ^^^^^^^^^^^^^
+  File "/home/button/.local/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 153, in retry_target
+    _retry_error_helper(
+  File "/home/button/.local/lib/python3.11/site-packages/google/api_core/retry/retry_base.py", line 212, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/home/button/.local/lib/python3.11/site-packages/google/api_core/retry/retry_unary.py", line 144, in retry_target
+    result = target()
+             ^^^^^^^^
+  File "/home/button/.local/lib/python3.11/site-packages/google/api_core/timeout.py", line 130, in func_with_timeout
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/button/.local/lib/python3.11/site-packages/google/api_core/grpc_helpers.py", line 174, in error_remapped_callable
+    raise exceptions.from_grpc_error(exc) from exc
+google.api_core.exceptions.Unknown: None Exception iterating requests!
