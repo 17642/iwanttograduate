@@ -127,7 +127,7 @@ def stt_thread():
             idx = 0
             while idx < len(audio):
                 chunk = audio[idx:idx+blocksize]
-                yield speech.StreamingRecognizeRequest(audio_content=chunk.astype(np.float32).tobytes())
+                yield speech.StreamingRecognizeRequest(audio_content=chunk.astype(np.int16).tobytes())
                 idx += blocksize
 
         config = speech.RecognitionConfig(
