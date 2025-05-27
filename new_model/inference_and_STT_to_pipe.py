@@ -9,6 +9,7 @@ from google.cloud import speech
 import json
 import os
 import wave
+import errno
 
 from hailo_platform import HEF, VDevice, InferVStreams, InputVStreamParams, OutputVStreamParams, FormatType
 
@@ -263,7 +264,16 @@ def main():
         print("프로그램 종료 요청(Ctrl+C) 감지!")
     finally:
         print("InputStream/리소스 정리 완료, 안전하게 종료.")
-        # 필요시 추가 clean-up (파이프 파일 삭제 등)
+        # 파이프 파일 삭제(존재할 때만)
+        for pipe_path in [EVENT_PIPE, STT_PIPE]:
+            try:
+                if os.path.exists(pipe_path):
+                    os.remove(pipe_path)
+                    print(f"파이프 파일 {pipe_path} 삭제 완료.")
+            except OSError as e:
+                # 파이프가 이미 없거나 사용 중일 경우 에러 무시
+                if e.errno != errno.ENOENT:
+                    print(f"파이프 파일 삭제 중 오류({pipe_path}): {e}")
 
 if __name__ == "__main__":
     main()
