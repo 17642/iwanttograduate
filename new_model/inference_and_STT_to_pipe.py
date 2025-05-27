@@ -13,22 +13,20 @@ import errno
 
 from hailo_platform import HEF, VDevice, InferVStreams, InputVStreamParams, OutputVStreamParams, FormatType
 
-# ====== 파이프 경로 ======
-EVENT_PIPE = "/tmp/event_pipe"   # 모델 추론 + 레이더 결과
-STT_PIPE = "/tmp/stt_pipe"       # STT 변환 결과
+EVENT_PIPE = "/tmp/event_pipe"
+STT_PIPE = "/tmp/stt_pipe"
 
-# ====== 오디오/모델 파라미터 ======
 HEF_PATH = "converted_model.hef"
 NUM_MELS = 64
 MAX_FRAMES = 128
 SAMPLE_RATE = 44100
 DURATION = 1.6   # 초
+STT_LANGUAGE_CODE = "ko-KR"
 
-DANGER_CLASS = set(range(14))  # 0~13이 위험, 14는 안전
+DANGER_CLASS = set(range(14))
 
-# === 큐: 위험감지/음성인식 각각 독립 큐 사용 ===
 HEF_QUEUE = queue.Queue(maxsize=20)
-STT_QUEUE = queue.Queue(maxsize=5)
+STT_MODE_FLAG = threading.Event()   # 음성 감지 중에는 True
 
 mel_transform = MelSpectrogram(
     sample_rate=SAMPLE_RATE,
@@ -37,22 +35,6 @@ mel_transform = MelSpectrogram(
     n_fft=400
 )
 db_transform = AmplitudeToDB()
-
-VAD_ENERGY_THRESHOLD = 0.02   # 실험적으로 조절 필요
-VAD_MIN_DURATION = 0.4        # 음성이 0.4초 이상 지속되어야 "음성시작" 인정
-STT_LANGUAGE_CODE = "ko-KR"
-
-buffer_lock = threading.Lock()
-
-def wave_to_temp_wavfile(wave_np, filename, samplerate=16000):
-    # wave_np: float32, [-1, 1]
-    audio_int16 = (wave_np * 32767).astype(np.int16)
-    with wave.open(filename, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2) # int16
-        wf.setframerate(samplerate)
-        wf.writeframes(audio_int16.tobytes())
-    return filename
 
 def preprocess_to_mel(wave):
     tensor = torch.from_numpy(wave).unsqueeze(0)
@@ -64,11 +46,9 @@ def preprocess_to_mel(wave):
         spec = np.pad(spec, ((0,0), (0,0), (0, MAX_FRAMES-t)))
     else:
         spec = spec[:, :, :MAX_FRAMES]
-        
     spec = np.transpose(spec, (1,2,0))  # (64, 128, 1)
     return spec
 
-# --- event_pipe에 메시지 기록 ---
 def send_event_pipe(msg_dict):
     try:
         with open(EVENT_PIPE, "w") as f:
@@ -77,7 +57,6 @@ def send_event_pipe(msg_dict):
     except Exception as e:
         print("[PIPE] 기록 실패:", e)
 
-# --- stt_pipe에 메시지 기록 ---
 def send_stt_pipe(msg_dict):
     try:
         with open(STT_PIPE, "w") as f:
@@ -93,20 +72,20 @@ def hef_inference_thread():
     input_info = network_group.get_input_vstream_infos()[0]
     output_info = network_group.get_output_vstream_infos()[0]
     input_vstreams_params = InputVStreamParams.make(network_group, format_type=FormatType.FLOAT32)
-    #input_vstreams_params = InputVStreamParams.make(name=input_info.name, shape=input_info.shape, format_type=FormatType.FLOAT32,quant_info = input_info.quant_info, timeout_ms=1000,  frames_count=1)
-    #input_vstreams_params = [input_vstreams_params]
-
     output_vstreams_params = OutputVStreamParams.make(network_group, format_type=FormatType.UINT8)
     with InferVStreams(network_group, input_vstreams_params, output_vstreams_params) as infer_pipeline:
+        normal_buffer = []
+        normal_buffer_len = 0
         while True:
-            audio = HEF_QUEUE.get()
-            mel_db = preprocess_to_mel(audio)
+            # STT_MODE_FLAG가 켜지면(음성 감지) hef 추론 중단
+            if STT_MODE_FLAG.is_set():
+                time.sleep(0.1)
+                continue
+            # 평상시 1.6초 단위 버퍼
+            indata = HEF_QUEUE.get()
+            mel_db = preprocess_to_mel(indata)
             mel_db = np.expand_dims(mel_db,axis=0)
-            #new_input_data = np.zeros((64,64,128,1)).astype(np.float32)
             input_data = {input_info.name: mel_db}
-            #print(input_info)
-            #print("Expected input shape:", input_info.shape)
-            #print("Actual input shape:", mel_db.shape)
             with network_group.activate():
                 infer_results = infer_pipeline.infer(input_data)
             scores = infer_results[output_info.name][0]
@@ -122,24 +101,49 @@ def hef_inference_thread():
                 send_event_pipe(msg)
             HEF_QUEUE.task_done()
 
-def stt_thread():
+def stt_google_streaming_thread():
     client = speech.SpeechClient()
-    while True:
-        audio = STT_QUEUE.get()
-        # 1. 실시간 스트리밍 방식으로 변환
-        def audio_generator():
-            blocksize = 2048
-            idx = 0
-            while idx < len(audio):
-                chunk = audio[idx:idx+blocksize]
+    # 마이크에서 구글 STT로 음성 전달
+    def stream_to_google():
+        # 마이크로부터 직접 스트림 생성
+        with sd.InputStream(
+            channels=1,
+            samplerate=SAMPLE_RATE,
+            dtype='float32',
+            blocksize=int(SAMPLE_RATE * 0.2),
+        ) as stream:
+            print("[STT] 음성 감지 대기중... (말하면 STT 시작)")
+            while True:
+                audio_frames = []
+                STT_MODE_FLAG.wait()  # 누군가 음성 감지 → True로 set되면 STT시작
+                print("[STT] 음성 감지됨! Google STT로 전송 시작")
+                start_time = time.time()
+                # 8초 제한 내에서 최대 10초(안 끊기면)까지
+                while STT_MODE_FLAG.is_set():
+                    frame, overflowed = stream.read(int(SAMPLE_RATE * 0.2))
+                    audio_frames.append(frame[:,0])
+                    # 10초 이상 연속 STT 금지(이상 감지용)
+                    if time.time() - start_time > 10:
+                        print("[STT] 10초 이상 음성, 강제 종료")
+                        break
+                # 음성 끝(플래그가 내려감)
+                if audio_frames:
+                    voice_data = np.concatenate(audio_frames)
+                    yield voice_data
+    def google_stt_once(voice_data):
+        # voice_data: float32 numpy, range -1~1
+        blocksize = 2048
+        idx = 0
+        def gen():
+            while idx < len(voice_data):
+                chunk = voice_data[idx:idx+blocksize]
                 chunk_pcm = np.clip(chunk, -1, 1)
                 chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
                 yield speech.StreamingRecognizeRequest(audio_content=chunk_pcm.tobytes())
                 idx += blocksize
-
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=STT_SAMPLE_RATE,
+            sample_rate_hertz=SAMPLE_RATE,
             language_code=STT_LANGUAGE_CODE,
             enable_automatic_punctuation=True,
         )
@@ -148,130 +152,88 @@ def stt_thread():
             interim_results=False,
             single_utterance=True
         )
-        try:
-            responses = client.streaming_recognize(streaming_config, audio_generator())
-            text = ""
-            for response in responses:
-                for result in response.results:
-                    if result.alternatives:
-                        text = result.alternatives[0].transcript
-                        break
-            print(f"[STT 결과] {text}")
-            msg = {
-                "timestamp": time.time(),
-                "type": "stt",
-                "text": text if text else ""
-            }
-            send_stt_pipe(msg)
-        except Exception as e:
-            print("[STT] 오류:", e)
-        STT_QUEUE.task_done()
+        responses = client.streaming_recognize(streaming_config, gen())
+        text = ""
+        for response in responses:
+            for result in response.results:
+                if result.alternatives:
+                    text = result.alternatives[0].transcript
+                    break
+        print(f"[STT 결과] {text}")
+        msg = {
+            "timestamp": time.time(),
+            "type": "stt",
+            "text": text if text else ""
+        }
+        send_stt_pipe(msg)
 
-# 전역 변수
-normal_buffer = []
-normal_buffer_len = 0
+    # 실제 스레드 본체
+    for voice_data in stream_to_google():
+        google_stt_once(voice_data)
+        STT_MODE_FLAG.clear()  # STT 끝나면 hef 재개
 
-def audio_callback(indata, frames, time_info, status):
-    global vad_voice_active, vad_voice_buffer, vad_voice_frames
-    global normal_buffer, normal_buffer_len
-
-    with buffer_lock:
-        wave = indata[:,0].copy()
-        energy = np.sqrt(np.mean(wave**2))
-    
-        if not vad_voice_active:
-            # === 평상시: 1.6초 블록 쌓기 ===
-            normal_buffer.append(wave)
-            normal_buffer_len += len(wave)
-            # VAD 체크
-            if energy > VAD_ENERGY_THRESHOLD:
-                vad_voice_frames += 1
-                vad_voice_buffer.append(wave)
-                if vad_voice_frames * frames/SAMPLE_RATE >= VAD_MIN_DURATION:
-                    vad_voice_active = True
-                    print("[VAD] 음성 감지 시작!")
-                    # normal_buffer에서 마지막 1~2개 wave를 vad_voice_buffer로 이전
-                    if len(normal_buffer) >= 2:
-                        vad_voice_buffer = normal_buffer[-2:]
-                    elif len(normal_buffer) == 1:
-                        vad_voice_buffer = normal_buffer[-1:]
-                    else:
-                        vad_voice_buffer = []
-                    normal_buffer = []
-                    normal_buffer_len = 0
-            else:
-                vad_voice_frames = 0
-                vad_voice_buffer.clear()
-            # 1.6초 쌓이면 HEF_QUEUE로
+def audio_input_thread():
+    """항상 마이크에서 1.6초짜리 버퍼를 HEF_QUEUE에 밀어넣음. STT_MODE_FLAG가 켜지면 멈춤"""
+    blocksize = int(SAMPLE_RATE * 0.2)
+    normal_buffer = []
+    normal_buffer_len = 0
+    with sd.InputStream(
+        channels=1,
+        samplerate=SAMPLE_RATE,
+        dtype='float32',
+        blocksize=blocksize,
+    ) as stream:
+        while True:
+            if STT_MODE_FLAG.is_set():
+                time.sleep(0.1)
+                continue
+            frame, overflowed = stream.read(blocksize)
+            frame = frame[:,0]
+            normal_buffer.append(frame)
+            normal_buffer_len += len(frame)
+            # (매 프레임마다 '말소리 감지' 시 STT_MODE_FLAG.set())
+            energy = np.sqrt(np.mean(frame**2))
+            # 구글 STT는 실험적으로 0.03~0.05면 거의 안 끊기고 동작함
+            if energy > 0.05:
+                STT_MODE_FLAG.set()
+                normal_buffer = []
+                normal_buffer_len = 0
+                continue
+            # 평상시 1.6초 쌓이면 hef 추론
             if normal_buffer_len >= int(SAMPLE_RATE * DURATION):
-                # 초과분은 잘라서 처리
-                buffer_concat = np.concatenate(normal_buffer)
-                hef_block = buffer_concat[:int(SAMPLE_RATE * DURATION)]
+                block = np.concatenate(normal_buffer)[:int(SAMPLE_RATE * DURATION)]
                 try:
-                    HEF_QUEUE.put(hef_block, timeout=0.1)
+                    HEF_QUEUE.put(block, timeout=0.1)
                 except queue.Full:
                     print("[HEF_QUEUE] 가득 참: 새 블록 버림!")
-                # 남은 샘플은 다음 블록으로(1.6초 단위로 rolling)
-                remain = buffer_concat[int(SAMPLE_RATE * DURATION):]
+                remain = np.concatenate(normal_buffer)[int(SAMPLE_RATE * DURATION):]
                 if len(remain) > 0:
                     normal_buffer = [remain]
                     normal_buffer_len = len(remain)
                 else:
                     normal_buffer = []
                     normal_buffer_len = 0
-        else:
-            vad_voice_buffer.append(wave)
-            if energy > VAD_ENERGY_THRESHOLD:
-                vad_voice_frames = 0
-            else:
-                vad_voice_frames += 1
-                if vad_voice_frames * frames/SAMPLE_RATE >= 0.5:
-                    voice_chunk = np.concatenate(vad_voice_buffer)
-                    try:
-                        STT_QUEUE.put(voice_chunk, timeout=0.1)
-                    except queue.Full:
-                        print("[STT_QUEUE] 가득 참: 새 STT 블록 버림!")
-                    vad_voice_active = False
-                    vad_voice_frames = 0
-                    vad_voice_buffer.clear()
-                    print("[VAD] 음성 종료, STT 전송")
-    
 
 def main():
-    global vad_voice_active, vad_voice_buffer, vad_voice_frames
-    vad_voice_active = False
-    vad_voice_buffer = []
-    vad_voice_frames = 0
-
     for pipe_path in [EVENT_PIPE, STT_PIPE]:
         if not os.path.exists(pipe_path):
             os.mkfifo(pipe_path)
     threading.Thread(target=hef_inference_thread, daemon=True).start()
-    threading.Thread(target=stt_thread, daemon=True).start()
-
+    threading.Thread(target=stt_google_streaming_thread, daemon=True).start()
+    threading.Thread(target=audio_input_thread, daemon=True).start()
     try:
-        # 0.2초 단위로 프레임 전송(VAD 반응성↑)
-        with sd.InputStream(
-            channels=1,
-            samplerate=SAMPLE_RATE,
-            blocksize=int(SAMPLE_RATE*0.2),
-            callback=audio_callback,
-        ):
-            print("실시간 감지 시작 (Ctrl+C로 종료)")
-            while True:
-                time.sleep(1)
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
         print("프로그램 종료 요청(Ctrl+C) 감지!")
     finally:
         print("InputStream/리소스 정리 완료, 안전하게 종료.")
-        # 파이프 파일 삭제(존재할 때만)
         for pipe_path in [EVENT_PIPE, STT_PIPE]:
             try:
                 if os.path.exists(pipe_path):
                     os.remove(pipe_path)
                     print(f"파이프 파일 {pipe_path} 삭제 완료.")
             except OSError as e:
-                # 파이프가 이미 없거나 사용 중일 경우 에러 무시
                 if e.errno != errno.ENOENT:
                     print(f"파이프 파일 삭제 중 오류({pipe_path}): {e}")
 
