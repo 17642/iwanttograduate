@@ -10,6 +10,7 @@ import json
 import os
 import wave
 import errno
+import webrtcvad
 
 from hailo_platform import HEF, VDevice, InferVStreams, InputVStreamParams, OutputVStreamParams, FormatType
 
@@ -179,10 +180,21 @@ def stt_google_streaming_thread():
         STT_MODE_FLAG.clear()  # STT 끝나면 hef 재개
 
 def audio_input_thread():
-    """항상 마이크에서 1.6초짜리 버퍼를 HEF_QUEUE에 밀어넣음. STT_MODE_FLAG가 켜지면 멈춤"""
+    """
+    항상 마이크에서 1.6초짜리 버퍼를 HEF_QUEUE에 밀어넣음.
+    STT_MODE_FLAG가 켜지면 멈춤.
+    webrtcvad로 실제 '말소리'만 감지해서 STT 전환.
+    """
+    vad = webrtcvad.Vad(2)  # 0~3: 높을수록 민감, 2 권장
+    vad_sample_rate = 16000  # webrtcvad는 16kHz만 지원
+    vad_frame_duration = 20  # ms (10, 20, 30만 가능)
+    vad_frame_length = int(vad_sample_rate * vad_frame_duration / 1000)  # 320
+
+    # 마이크 스트림은 여전히 44.1kHz float32로 받아오고, VAD 검사용 다운샘플 필요
     blocksize = int(SAMPLE_RATE * 0.2)
     normal_buffer = []
     normal_buffer_len = 0
+
     with sd.InputStream(
         channels=1,
         samplerate=SAMPLE_RATE,
@@ -195,17 +207,33 @@ def audio_input_thread():
                 continue
             frame, overflowed = stream.read(blocksize)
             frame = frame[:,0]
-            normal_buffer.append(frame)
-            normal_buffer_len += len(frame)
-            # (매 프레임마다 '말소리 감지' 시 STT_MODE_FLAG.set())
-            energy = np.sqrt(np.mean(frame**2))
-            # 구글 STT는 실험적으로 0.03~0.05면 거의 안 끊기고 동작함
-            if energy > 0.05:
+
+            # ----- webrtcvad용 다운샘플 및 변환 -----
+            # 1. 44.1kHz float32 → 16kHz int16로 변환
+            frame_resampled = np.interp(
+                np.linspace(0, len(frame), int(len(frame) * vad_sample_rate / SAMPLE_RATE), endpoint=False),
+                np.arange(len(frame)), frame
+            ).astype(np.float32)
+            frame_int16 = (np.clip(frame_resampled, -1, 1) * 32767).astype(np.int16)
+
+            # 2. 20ms(320샘플)씩 쪼개서 VAD에 전달
+            vad_detected = False
+            for start in range(0, len(frame_int16) - vad_frame_length + 1, vad_frame_length):
+                chunk = frame_int16[start:start+vad_frame_length].tobytes()
+                if vad.is_speech(chunk, vad_sample_rate):
+                    vad_detected = True
+                    break
+
+            # 실제 '말소리' 있을 때만 STT 모드 진입
+            if vad_detected:
                 STT_MODE_FLAG.set()
                 normal_buffer = []
                 normal_buffer_len = 0
                 continue
-            # 평상시 1.6초 쌓이면 hef 추론
+
+            # --- 이하 기존 코드 (HEF용 1.6초 누적) ---
+            normal_buffer.append(frame)
+            normal_buffer_len += len(frame)
             if normal_buffer_len >= int(SAMPLE_RATE * DURATION):
                 block = np.concatenate(normal_buffer)[:int(SAMPLE_RATE * DURATION)]
                 try:
