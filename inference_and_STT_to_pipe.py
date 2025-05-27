@@ -36,9 +36,9 @@ mel_transform = MelSpectrogram(
 db_transform = AmplitudeToDB()
 
 STT_LANGUAGE_CODE = "ko-KR"
-STT_SAMPLE_RATE = 16000
+STT_SAMPLE_RATE = 44100
 
-def wave_to_temp_wavfile(wave_np, filename, samplerate=16000):
+def wave_to_temp_wavfile(wave_np, filename, samplerate=44100):
     # wave_np: float32, [-1, 1]
     audio_int16 = (wave_np * 32767).astype(np.int16)
     with wave.open(filename, "wb") as wf:
