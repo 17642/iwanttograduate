@@ -26,8 +26,8 @@ DURATION = 1.6   # 초
 DANGER_CLASS = set(range(14))  # 0~13이 위험, 14는 안전
 
 # === 큐: 위험감지/음성인식 각각 독립 큐 사용 ===
-HEF_QUEUE = queue.Queue()
-STT_QUEUE = queue.Queue()
+HEF_QUEUE = queue.Queue(maxsize=20)
+STT_QUEUE = queue.Queue(maxsize=5)
 
 mel_transform = MelSpectrogram(
     sample_rate=SAMPLE_RATE,
@@ -40,6 +40,8 @@ db_transform = AmplitudeToDB()
 VAD_ENERGY_THRESHOLD = 0.02   # 실험적으로 조절 필요
 VAD_MIN_DURATION = 0.4        # 음성이 0.4초 이상 지속되어야 "음성시작" 인정
 STT_LANGUAGE_CODE = "ko-KR"
+
+buffer_lock = threading.Lock()
 
 def wave_to_temp_wavfile(wave_np, filename, samplerate=16000):
     # wave_np: float32, [-1, 1]
@@ -70,6 +72,7 @@ def send_event_pipe(msg_dict):
     try:
         with open(EVENT_PIPE, "w") as f:
             f.write(json.dumps(msg_dict, ensure_ascii=False) + "\n")
+            f.flush()
     except Exception as e:
         print("[PIPE] 기록 실패:", e)
 
@@ -78,6 +81,7 @@ def send_stt_pipe(msg_dict):
     try:
         with open(STT_PIPE, "w") as f:
             f.write(json.dumps(msg_dict, ensure_ascii=False) + "\n")
+            f.flush()
     except Exception as e:
         print("[STT_PIPE] 기록 실패:", e)
 
@@ -127,7 +131,9 @@ def stt_thread():
             idx = 0
             while idx < len(audio):
                 chunk = audio[idx:idx+blocksize]
-                yield speech.StreamingRecognizeRequest(audio_content=chunk.astype(np.int16).tobytes())
+                chunk_pcm = np.clip(chunk, -1, 1)
+                chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                yield speech.StreamingRecognizeRequest(audio_content=chunk_pcm.tobytes())
                 idx += blocksize
 
         config = speech.RecognitionConfig(
@@ -168,49 +174,66 @@ def audio_callback(indata, frames, time_info, status):
     global vad_voice_active, vad_voice_buffer, vad_voice_frames
     global normal_buffer, normal_buffer_len
 
-    wave = indata[:,0].copy()
-    energy = np.sqrt(np.mean(wave**2))
-
-    if not vad_voice_active:
-        # === 평상시: 1.6초 블록 쌓기 ===
-        normal_buffer.append(wave)
-        normal_buffer_len += len(wave)
-        # VAD 체크
-        if energy > VAD_ENERGY_THRESHOLD:
-            vad_voice_frames += 1
-            vad_voice_buffer.append(wave)
-            if vad_voice_frames * frames/SAMPLE_RATE >= VAD_MIN_DURATION:
-                vad_voice_active = True
-                print("[VAD] 음성 감지 시작!")
-                # 음성 시작하면 평상시 버퍼 비우기(누적 중단)
-                normal_buffer = []
-                normal_buffer_len = 0
-        else:
-            vad_voice_frames = 0
-            vad_voice_buffer.clear()
-        # 1.6초 쌓이면 HEF_QUEUE로
-        if normal_buffer_len >= int(SAMPLE_RATE * DURATION):
-            # 초과분은 잘라서 처리
-            buffer_concat = np.concatenate(normal_buffer)
-            hef_block = buffer_concat[:int(SAMPLE_RATE * DURATION)]
-            HEF_QUEUE.put(hef_block)
-            # 남은 샘플은 다음 블록으로(1.6초 단위로 rolling)
-            remain = buffer_concat[int(SAMPLE_RATE * DURATION):]
-            normal_buffer = [remain] if len(remain) > 0 else []
-            normal_buffer_len = len(remain)
-    else:
-        vad_voice_buffer.append(wave)
-        if energy > VAD_ENERGY_THRESHOLD:
-            vad_voice_frames = 0
-        else:
-            vad_voice_frames += 1
-            if vad_voice_frames * frames/SAMPLE_RATE >= 0.5:
-                voice_chunk = np.concatenate(vad_voice_buffer)
-                STT_QUEUE.put(voice_chunk)
-                vad_voice_active = False
+    with buffer_lock:
+        wave = indata[:,0].copy()
+        energy = np.sqrt(np.mean(wave**2))
+    
+        if not vad_voice_active:
+            # === 평상시: 1.6초 블록 쌓기 ===
+            normal_buffer.append(wave)
+            normal_buffer_len += len(wave)
+            # VAD 체크
+            if energy > VAD_ENERGY_THRESHOLD:
+                vad_voice_frames += 1
+                vad_voice_buffer.append(wave)
+                if vad_voice_frames * frames/SAMPLE_RATE >= VAD_MIN_DURATION:
+                    vad_voice_active = True
+                    print("[VAD] 음성 감지 시작!")
+                    # normal_buffer에서 마지막 1~2개 wave를 vad_voice_buffer로 이전
+                    if len(normal_buffer) >= 2:
+                        vad_voice_buffer = normal_buffer[-2:]
+                    elif len(normal_buffer) == 1:
+                        vad_voice_buffer = normal_buffer[-1:]
+                    else:
+                        vad_voice_buffer = []
+                    normal_buffer = []
+                    normal_buffer_len = 0
+            else:
                 vad_voice_frames = 0
                 vad_voice_buffer.clear()
-                print("[VAD] 음성 종료, STT 전송")
+            # 1.6초 쌓이면 HEF_QUEUE로
+            if normal_buffer_len >= int(SAMPLE_RATE * DURATION):
+                # 초과분은 잘라서 처리
+                buffer_concat = np.concatenate(normal_buffer)
+                hef_block = buffer_concat[:int(SAMPLE_RATE * DURATION)]
+                try:
+                    HEF_QUEUE.put(hef_block, timeout=0.1)
+                except queue.Full:
+                    print("[HEF_QUEUE] 가득 참: 새 블록 버림!")
+                # 남은 샘플은 다음 블록으로(1.6초 단위로 rolling)
+                remain = buffer_concat[int(SAMPLE_RATE * DURATION):]
+                if len(remain) > 0:
+                    normal_buffer = [remain]
+                    normal_buffer_len = len(remain)
+                else:
+                    normal_buffer = []
+                    normal_buffer_len = 0
+        else:
+            vad_voice_buffer.append(wave)
+            if energy > VAD_ENERGY_THRESHOLD:
+                vad_voice_frames = 0
+            else:
+                vad_voice_frames += 1
+                if vad_voice_frames * frames/SAMPLE_RATE >= 0.5:
+                    voice_chunk = np.concatenate(vad_voice_buffer)
+                    try:
+                        STT_QUEUE.put(voice_chunk, timeout=0.1)
+                    except queue.Full:
+                        print("[STT_QUEUE] 가득 참: 새 STT 블록 버림!")
+                    vad_voice_active = False
+                    vad_voice_frames = 0
+                    vad_voice_buffer.clear()
+                    print("[VAD] 음성 종료, STT 전송")
     
 
 def main():
@@ -225,16 +248,22 @@ def main():
     threading.Thread(target=hef_inference_thread, daemon=True).start()
     threading.Thread(target=stt_thread, daemon=True).start()
 
-    # 0.2초 단위로 프레임 전송(VAD 반응성↑)
-    with sd.InputStream(
-        channels=1,
-        samplerate=SAMPLE_RATE,
-        blocksize=int(SAMPLE_RATE*0.2),
-        callback=audio_callback,
-    ):
-        print("실시간 감지 시작 (Ctrl+C로 종료)")
-        while True:
-            time.sleep(1)
+    try:
+        # 0.2초 단위로 프레임 전송(VAD 반응성↑)
+        with sd.InputStream(
+            channels=1,
+            samplerate=SAMPLE_RATE,
+            blocksize=int(SAMPLE_RATE*0.2),
+            callback=audio_callback,
+        ):
+            print("실시간 감지 시작 (Ctrl+C로 종료)")
+            while True:
+                time.sleep(1)
+    except KeyboardInterrupt:
+        print("프로그램 종료 요청(Ctrl+C) 감지!")
+    finally:
+        print("InputStream/리소스 정리 완료, 안전하게 종료.")
+        # 필요시 추가 clean-up (파이프 파일 삭제 등)
 
 if __name__ == "__main__":
     main()
