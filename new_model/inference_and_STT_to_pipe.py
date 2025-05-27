@@ -160,36 +160,51 @@ def stt_thread():
             print("[STT] 오류:", e)
         STT_QUEUE.task_done()
 
-def audio_callback(indata, frames, time_info, status):
-    # 실시간 오디오 프레임(1.6초 or 짧게)
-    global vad_voice_active, vad_voice_buffer, vad_voice_frames
-    wave = indata[:,0].copy()
+# 전역 변수
+normal_buffer = []
+normal_buffer_len = 0
 
+def audio_callback(indata, frames, time_info, status):
+    global vad_voice_active, vad_voice_buffer, vad_voice_frames
+    global normal_buffer, normal_buffer_len
+
+    wave = indata[:,0].copy()
     energy = np.sqrt(np.mean(wave**2))
-    # --- VAD State Machine ---
+
     if not vad_voice_active:
+        # === 평상시: 1.6초 블록 쌓기 ===
+        normal_buffer.append(wave)
+        normal_buffer_len += len(wave)
+        # VAD 체크
         if energy > VAD_ENERGY_THRESHOLD:
             vad_voice_frames += 1
             vad_voice_buffer.append(wave)
             if vad_voice_frames * frames/SAMPLE_RATE >= VAD_MIN_DURATION:
-                # 목소리 시작
                 vad_voice_active = True
                 print("[VAD] 음성 감지 시작!")
+                # 음성 시작하면 평상시 버퍼 비우기(누적 중단)
+                normal_buffer = []
+                normal_buffer_len = 0
         else:
             vad_voice_frames = 0
             vad_voice_buffer.clear()
-        if not vad_voice_active:
-            # 평상시 1.6초 블록 → 위험감지
-            if len(wave) == int(SAMPLE_RATE*DURATION):
-                HEF_QUEUE.put(wave)
+        # 1.6초 쌓이면 HEF_QUEUE로
+        if normal_buffer_len >= int(SAMPLE_RATE * DURATION):
+            # 초과분은 잘라서 처리
+            buffer_concat = np.concatenate(normal_buffer)
+            hef_block = buffer_concat[:int(SAMPLE_RATE * DURATION)]
+            HEF_QUEUE.put(hef_block)
+            # 남은 샘플은 다음 블록으로(1.6초 단위로 rolling)
+            remain = buffer_concat[int(SAMPLE_RATE * DURATION):]
+            normal_buffer = [remain] if len(remain) > 0 else []
+            normal_buffer_len = len(remain)
     else:
         vad_voice_buffer.append(wave)
         if energy > VAD_ENERGY_THRESHOLD:
-            vad_voice_frames = 0  # Reset silence timer
+            vad_voice_frames = 0
         else:
             vad_voice_frames += 1
-            if vad_voice_frames * frames/SAMPLE_RATE >= 0.5:  # 0.5초 이상 조용하면
-                # 목소리 끝!
+            if vad_voice_frames * frames/SAMPLE_RATE >= 0.5:
                 voice_chunk = np.concatenate(vad_voice_buffer)
                 STT_QUEUE.put(voice_chunk)
                 vad_voice_active = False
