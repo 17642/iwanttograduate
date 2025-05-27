@@ -58,7 +58,9 @@ def preprocess_to_mel(wave):
         spec = np.pad(spec, ((0,0), (0,0), (0, MAX_FRAMES-t)))
     else:
         spec = spec[:, :, :MAX_FRAMES]
-    return spec[:, None, :, :]  # (1, 1, 64, 128)
+        
+    spec = np.transpose(spec, (1, 2, 0))  # shape: (64, 128, 1)
+    return spec
 
 # --- event_pipe에 메시지 기록 ---
 def send_event_pipe(msg_dict):
